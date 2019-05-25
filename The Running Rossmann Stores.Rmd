@@ -1,0 +1,527 @@
+---
+title: "The running Rossmann guys"
+author: "Trung Nguyen"
+date: "3 March 2019"
+output:
+  html_document:
+    toc: true
+    theme: united
+    number_section: true
+    toc_depth: 3
+    highlight: tango
+    keep_md: yes
+---
+
+# Summary
+
+In this project, I first did some exploratory analysis with modified codes based on some kernels in Kaggle. Then I added "States" as a feature to the dataset after cross-referenced the data with holidays to identify stores locations. Finally, applied different algorithms and pick the best (still has room for ensemble modeling).
+
+# Overview
+
+The training data set for the Rossman Store Sales consists of sales data for a set of 1115 stores across 942 days. If we multiply those two numbers together we would would expect to find a data set with **1050330** observations, however, there are in fact only **1017209** observations in the training set.
+
+When performed EDA on the dataset, I figured out that normal *timeseries forecast* cannot be done because the missing gap is too big in the dataset (there is at least 3 - 4 months period where only a small number of stores reported sales). Thus, the first part of this notebook will focus on how to deal with mising data imputation (feature by feature), then follow up with discussion on which route to take on (timeseries or different regression techniques)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      fig.path = "images/")
+
+getwd()
+# clear the environment
+rm(list= ls())
+gc() # garbage collection
+```
+
+# Initialize packages
+
+```{r initialize packages, results = FALSE, warning = FALSE, message = FALSE}
+# load packages and set options
+options(stringsAsFactors = FALSE)
+
+# install packages if not available
+packages <- c("readr","data.table", #read data
+              "lubridate", "zoo", #date time conversion
+              "tidyverse", # full set of pkgs
+              "dplyr", #data exploratory + manipulation
+              "caTools", # features engineering
+              "VIM", # visualizing missing data
+              "ggplot2","ggthemes", "corrplot", # plotting graphs
+              "caret", # ML libs
+              "Hmisc" # EDA
+)
+
+if (length(setdiff(packages, rownames(installed.packages()))) > 0) {
+  install.packages(setdiff(packages, rownames(installed.packages())))
+}
+lapply(packages, require, character.only = TRUE)
+```
+
+# Read data
+
+Read train, test and submit sample data from input folder
+
+```{r Read inputs,  results = "hide", warning = FALSE, message = FALSE}
+
+# set TryCatch for input folder (on kaggle kernel or local)
+
+file2read.df <- c('test','train','store')
+
+readinputs <- function(filename){
+   assign(filename,
+          tryCatch(fread(paste0("./input/",filename,".csv")),
+                 error = function(e){
+                   print('Detect working environment is not Kaggle kernel')
+                   fread(paste0("../input/",filename,".csv"))
+                 })
+          ,envir = .GlobalEnv) 
+}
+
+for (i in 1:length(file2read.df)){
+  readinputs(file2read.df[i])
+}
+```
+
+As stated in this official discussion [Link](https://www.kaggle.com/c/rossmann-store-sales/discussion/17048#96921), the codes bellow fixes the missing data 
+
+```{r Input fix}
+test <- test %>% mutate(Open = replace(Open, which(Store == 622 &
+                                             Date > as.Date('2015-09-04') &
+                                             Date < as.Date('2015-09-18') &
+                                             is.na(Open) == TRUE),0))
+```
+
+# Exploratory Data Analysis (EDA)
+Merge train and test dataset to get an overview of all features. Since the test dataset does not have "Customers" and "Sales", I added dummy features to match the binding. Also removed the "Id" column.
+
+```{r EDA - Merge to get full dataset}
+# Change type for "Date"
+train$Date <- parse_date_time(train$Date,'%y-%m-%d') #lubridate pkg is fastest
+test$Date <- parse_date_time(test$Date, '%y-%m-%d')
+
+# Add and remove variables to test
+tmp <- test %>%
+  select(-Id) %>%
+  mutate(Sales = NA,
+         Customers = NA)
+
+full <- rbind(train,tmp)
+```
+
+Some of the charts were taken from [Exploratory Analysis Rossmann Kernel](https://www.kaggle.com/thie1e/exploratory-analysis-rossmann) with modifications.
+Explore histograms between sales and customers.
+
+```{r EDA - Charts}
+# Sales histograms
+hist(train$Sales, 100,
+     main = "Sales per store",
+     xlab = "Sales")
+
+hist(aggregate(train[Sales != 0]$Sales, 
+               by = list(train[Sales != 0]$Store), mean)$x, 100, 
+     main = "Mean sales per store when store was not closed",
+     xlab = "Sales")
+
+# Customer histograms
+hist(train$Customers, 100,
+     main = "Customers per store",
+     xlab = "Customers")
+
+hist(aggregate(train[Sales != 0]$Customers, 
+               by = list(train[Sales != 0]$Store), mean)$x, 100,
+     main = "Mean customers per store when store was not closed",
+     xlab = "Customers")
+
+# Sales per day of the week
+ggplot(train[Sales != 0],
+       aes(x = factor(DayOfWeek), y = Sales)) + 
+    geom_jitter(alpha = 0.1) + 
+    geom_boxplot(color = "yellow", outlier.colour = NA, fill = NA) + 
+  labs(x = "Weekdays", title = "Sales per day of week")
+```
+
+The plot below shows the differences in sales before and after competitors open in the same area.**147** stores
+had a competitor move into their area during the available time span. The competition leaves a 'dent' in the sales which looks a little different depending on the chosen `timespan`.
+
+```{r EDA - Sales b4 and after competition}
+# Convert the CompetitionOpenSince... variables to one Date variable
+store$CompetitionOpenSince <- as.yearmon(paste(store$CompetitionOpenSinceYear, 
+                                               store$CompetitionOpenSinceMonth, sep = "-"))
+# Merge store and train 
+train_store <- merge(train, store, by = "Store")
+
+# Sales before and after competition opens
+train_store$DateYearmon <- as.yearmon(train_store$Date)
+train_store <- train_store[order(Date)]
+timespan <- 100 # Days to collect before and after Opening of competition
+beforeAndAfterComp <- function(s) {
+    x <- train_store[Store == s]
+    daysWithComp <- x$CompetitionOpenSince >= x$DateYearmon
+    if (any(!daysWithComp)) {
+        compOpening <- head(which(!daysWithComp), 1) - 1
+        if (compOpening > timespan & compOpening < (nrow(x) - timespan)) {
+           x <- x[(compOpening - timespan):(compOpening + timespan), ] 
+            x$Day <- 1:nrow(x)
+            return(x)
+        }
+    }
+}
+temp <- lapply(unique(train_store[!is.na(CompetitionOpenSince)]$Store), beforeAndAfterComp)
+temp <- do.call(rbind, temp)
+# 147 stores first had no competition but at least 100 days before the end
+# of the data set
+length(unique(temp$Store))
+ggplot(temp[Sales != 0], aes(x = Day, y = Sales)) + 
+    geom_smooth() + 
+    ggtitle(paste("Competition opening around day", timespan))
+
+rm(temp)
+```
+
+
+The different store types and assortment types imply different overall levels of sales and seem to be exhibiting different trends:
+
+```{r EDA - Diff Stores sales}
+ggplot(train_store[Sales != 0], 
+       aes(x = as.Date(Date), y = Sales, color = factor(StoreType))) + 
+    geom_smooth(size = 2)
+
+ggplot(train_store[Customers != 0], 
+       aes(x = as.Date(Date), y = Customers, color = factor(StoreType))) + 
+    geom_smooth(size = 2)
+
+ggplot(train_store[Sales != 0], 
+       aes(x = as.Date(Date), y = Sales, color = factor(Assortment))) + 
+    geom_smooth(size = 2)
+
+ggplot(train_store[Sales != 0], 
+       aes(x = as.Date(Date), y = Customers, color = factor(Assortment))) + 
+    geom_smooth(size = 2)
+```
+
+From the graph below, the relationship between 'Competitor distance' and 'Sales' is a little bit counterintuitive. We can see that the closer the competitors, the higher the sales. The reason might be that these shops are already in highly dense area (like shopping districts or main streets).
+
+```{r EDA - sales vs comp dist}
+salesByDist <- aggregate(train_store[Sales != 0 & !is.na(CompetitionDistance)]$Sales, 
+               by = list(train_store[Sales != 0 & !is.na(CompetitionDistance)]$CompetitionDistance), mean)
+
+colnames(salesByDist) <- c("CompetitionDistance", "MeanSales")
+ggplot(salesByDist, aes(x = log(CompetitionDistance), y = log(MeanSales))) + 
+    geom_point() + geom_smooth()
+```
+
+**Missing dates**
+
+We can figure out how many sales date data is missing by counting the number of stores rows exist in a particular time period. As can be seen from the graph, the gap occurs from end of June '14 until end of the year '14 (the 2nd graph shows a smaller scale)
+
+```{r, EDA - Stores count by date}
+by_Date <- train %>% group_by(Date) %>% 
+  summarise(Num_Stores=n())
+
+# Overview of missing stores values period
+ggplot(by_Date, aes(Date,Num_Stores)) + geom_line()
+
+```
+
+Visualize missing data using **VIM** package. Seems like the data is free from missing values after the hot fix from official channel.
+
+```{r EDA - Missing data}
+
+aggr_plot <- VIM::aggr(full %>% select(-c("Sales","Customers")), 
+                       col=c('navyblue','red'), numbers=TRUE, sortVars=TRUE, labels=names(data), cex.axis=.7, gap=3,
+                       ylab=c("Histogram of missing data","Pattern"))
+```
+
+# Features Engineering
+
+## States as a feature
+- Since the stores locations are scattered in EU, it is likely that multiple stores would have different *"StateHoliday"*. However, inspired from this repository in Python of @gereleth [Putting stores on map](https://gist.github.com/gereleth/781a92c97b58b07a11e2#file-putting_stores_on_map-ipynb), I decided to adopt the code and translate into R to add states as a feature to our dataset.
+
+* External sources:
+  + Public holidays data: http://www.timeanddate.com/holidays/germany/2013
+  + School holidays data: http://www.holidays-info.com/School-Holidays-Germany/2015/school-holidays_2015.html
+Start by grouping and cross-referencing stores with State Holidays data
+
+```{r FE - States Holiday}
+# Overview of public holiday dates and numbers of stores celebrating
+holiday <- train %>% filter(StateHoliday == 'a')
+
+## Saxony (SN) - Repentance Day (20-11-2013)
+SN <- holiday %>% filter(Date == ymd("2013-11-20"))
+
+## BW_BY_ST - Epiphany (06-01-2013)
+BW_BY_ST <- holiday %>% filter(Date == ymd("2013-01-06"))
+
+## BW_BY_HE_NW_RP_SL - Corpus Christi (30-05-2013) (also with SN)
+BW_BY_HE_NW_RP_SL <- holiday %>% filter(Date == ymd("2013-05-30"))
+# Remove SN from the list
+BW_BY_HE_NW_RP_SL <- anti_join(BW_BY_HE_NW_RP_SL,SN, by = "Store")
+
+## BY_SL - Assumption of Mary (15-08-2013)
+BY_SL <- holiday %>% filter(Date == ymd("2013-08-15"))
+
+## BB_MV_SN_ST_TH - Reformation day (31-10-2013)
+BB_MV_SN_ST_TH <- holiday %>% filter(Date == ymd("2013-10-31"))
+
+## BW_BY_NW_RP_SL- All Saint's Day (01-11-2013)
+BW_BY_NW_RP_SL <- holiday %>% filter(Date == ymd("2013-11-01"))
+
+################################
+# Intersecting and Setxoring to split states
+BW_BY <- semi_join(BW_BY_ST, BW_BY_HE_NW_RP_SL, by = "Store")
+ST <- anti_join(BW_BY_ST, BW_BY, by = "Store")
+BY <- semi_join(BW_BY, BY_SL, by = "Store")
+SL <- anti_join(BY, BY_SL, by = "Store")
+BW <- anti_join(BW_BY,BY, by = "Store")
+HE <- anti_join(BW_BY_HE_NW_RP_SL, BW_BY_NW_RP_SL, by = "Store")
+BB_MV_TH <- anti_join(anti_join(BB_MV_SN_ST_TH, SN, by = "Store"),ST, by = "Store")
+NW_RP <- anti_join(BW_BY_NW_RP_SL, BW_BY, by = "Store")
+
+allstores <- train %>% distinct(Store) # get all stores ID
+BE_HB_HH_NI_SH <- anti_join(anti_join(allstores, BW_BY_HE_NW_RP_SL, by = "Store"), BB_MV_SN_ST_TH, by = "Store")
+
+# # Checking results (1115 stores in 16 states)
+# paste0(nrow(BE_HB_HH_NI_SH),' stores located in BE, HB, HH, NI, SH.')
+# paste0(nrow(NW_RP),' stores located in NW, RP.')
+# paste0(nrow(HE),' stores located in HE.')
+# paste0(nrow(BY),' stores located in BY.')
+# paste0(nrow(ST),' stores located in ST.')
+# paste0(nrow(SL),' stores located in SL.')
+# paste0(nrow(BW),' stores located in BW.')
+# paste0(nrow(SN),' stores located in SN.')
+```
+
+Now using school holiday to further intersecting and setoxring to cluster stores into states
+
+```{r FE - States School Holiday}
+# 26-03-2015 is a school holiday in RP but now NW
+RP <- train %>% 
+  filter(Date == ymd("2015-03-26") & SchoolHoliday == 1) %>%
+  semi_join(NW_RP, by = "Store")
+NW <- anti_join(NW_RP, RP, by = "Store")
+
+# Winter holidays not lasting till Feb 14th rule out MV. 
+# Easter holidays starting on Mar 30th suggest TH. 
+# Confirmed by summer holidays starting on Jul 13th.
+TH <- BB_MV_TH
+
+# Only HH has easter holidays on Mar 2nd. And on May 5th.
+HH <- train %>%
+  filter(Date ==ymd("2015-03-02") & SchoolHoliday == 1) %>%
+  semi_join(BE_HB_HH_NI_SH, by = "Store")
+
+BE_HB_NI_SH <- anti_join(BE_HB_HH_NI_SH, HH, by = "Store")
+# Only SH has holidays on Apr 17th. And on Feb 2nd.
+SH <- train %>%
+  filter(Date == ymd("2015-04-17") & SchoolHoliday == 1) %>%
+  semi_join(BE_HB_NI_SH, by = "Store")
+
+BE_HB_NI <- anti_join(BE_HB_NI_SH, SH, by = "Store")
+
+#  Mar 25th is not a holiday in BE.
+BE <- train %>%
+  filter(Date == ymd("2015-03-25") & SchoolHoliday == 1) %>%
+  semi_join(BE_HB_NI, by = "Store")
+
+HB_NI <- anti_join(BE_HB_NI, BE, by = "Store")
+```
+
+Save the states into **store** dataset and plot the results of store numbers in **train** and **test** datasets. We can see that the **test** dataset does not contain store data from 5 states: **HB, NI, SN, ST** and **TH**.
+```{r FE - Save and plot results}
+#### Saving results to "store" df
+store <-store %>%
+  mutate(States = case_when(
+    Store %in% intersect(store$Store, BW$Store) ~ "BW",
+    Store %in% intersect(store$Store, BY$Store) ~ "BY",
+    Store %in% intersect(store$Store, BE$Store) ~ "BE",
+    Store %in% intersect(store$Store, HB_NI$Store) ~ "HB, NI",
+    Store %in% intersect(store$Store, HH$Store) ~ "HH",
+    Store %in% intersect(store$Store, HE$Store) ~ "HE",
+    Store %in% intersect(store$Store, NW$Store) ~ "NW",
+    Store %in% intersect(store$Store, RP$Store) ~ "RP",
+    Store %in% intersect(store$Store, SN$Store) ~ "SN",
+    Store %in% intersect(store$Store, ST$Store) ~ "ST",
+    Store %in% intersect(store$Store, SH$Store) ~ "SH",
+    Store %in% intersect(store$Store, TH$Store) ~ "TH"))
+
+# Plot results
+tmp1 <-store %>% 
+  semi_join(train, by = "Store") %>%
+  select(Store, States) %>%
+  mutate(Dataset = "train") %>%
+  group_by(States, Dataset) %>%
+  tally()
+
+tmp2 <-store %>% 
+  semi_join(test, by = "Store") %>%
+  select(Store, States) %>%
+  mutate(Dataset = "test") %>%
+  group_by(States, Dataset) %>%
+  tally()
+
+tmp <- rbind(tmp1,tmp2)
+
+ggplot(tmp, aes(States, n, fill = Dataset)) +
+  geom_bar(stat="identity", position = "dodge") + 
+  scale_fill_brewer(palette = "Set1") +
+  labs(y = "Number of Stores")
+```
+
+Next, I will split the time into 3 separate features: Year, Month, Week. Next, I perform log transformation on the **Sales** feature since the data spans accross a large timeline (rules of thumb). 
+
+```{r FE - split time and log sales}
+train <- train %>%
+  mutate(Week = week(Date),
+         Month = month(Date),
+         Year = year(Date),
+         logSales = log1p(Sales)) 
+# %> inner_join(store %>% select(Store, States), by = "Store")
+
+test <- test %>%
+  mutate(Week = week(Date),
+         Month = month(Date),
+         Year = year(Date)) 
+# %>%  inner_join(store %>% select(Store, States), by = "Store")
+```
+
+## Combine with store data
+
+Perform some FE on stores dataset
+
+```{r FE - cutomize stores dataset}
+# impute Competition Values 
+store$CompetitionDistance[is.na(store$CompetitionDistance)] <- 75000 # Dealing with NA
+
+store$CompetitionStrength <- cut(store$CompetitionDistance, breaks=c(0, 1500, 6000, 12000, 20000, Inf), labels=FALSE) 
+# 15 min, 1/2/3 hours (or walking and 10/20/30 min driving)
+
+store <- store %>%
+  mutate(SundayStore = as.numeric(store$Store %in% unique(train$Store[train$DayOfWeek==7 & train$Open==1])), #detect Sunday-store
+         StoreType = as.factor(StoreType),
+         Assortment = as.factor(Assortment))
+```
+
+
+In this step, I combined both existing training and testing dataset with stores to form the final consolidation dataset.
+
+```{r FE - merge with stores dataset}
+# Merge store with train and test datasets
+train <- inner_join(train, store, by = "Store")
+test <- inner_join(test, store, by = "Store")
+
+# There are some NAs in the integer columns so conversion to zero
+train[is.na(train)]   <- 0
+test[is.na(test)]   <- 0
+
+# Set DayOfWeek, Week, Month, Year as factor (experimenting)
+train <- train %>%
+  mutate(Open = as.factor(Open),
+         Promo = as.factor(Promo),
+         SchoolHoliday = as.factor(SchoolHoliday),
+         StateHoliday = as.factor(StateHoliday),
+         DayOfWeek = as.factor(DayOfWeek),
+         Week = as.factor(Week),
+         Month = as.factor(Month),
+         Year = as.factor(Year))
+
+test <- test %>%
+  mutate(Open = as.factor(Open),
+         Promo = as.factor(Promo),
+         SchoolHoliday = as.factor(SchoolHoliday),
+         StateHoliday = as.factor(StateHoliday),
+         DayOfWeek = as.factor(DayOfWeek),
+         Week = as.factor(Week),
+         Month = as.factor(Month),
+         Year = as.factor(Year))
+
+```
+
+# Models Building
+
+Setup k-fold cross validation with k = 5 (rule of thumb), also set seed for reproductability.
+"Features" is a set of chosen features to train the model. Furthermore, after trying to turn **Week**, **DayOfWeek**, **Month** and **Year** variables into **factors**, the error rates reduce significantly case by case (minimum 0.01)
+
+```{r MB - Setup}
+train_control <- trainControl( ## 5-cross validation
+  method = "cv",
+  number = 5,
+  seeds = set.seed(1908)
+)
+# Create "features" sets
+## Set up variable to use all features other than those specified here
+col2remove <- c("Id","Date",
+                "Sales",
+                #"logSales",
+                "Customers", 
+                "CompetitionDistance", 
+                "CompetitionOpenSinceMonth", 
+                "CompetitionOpenSinceYear", 
+                "Promo2SinceWeek", 
+                "Promo2SinceYear", 
+                "PromoInterval", 
+                "CompetitionEntrance")
+
+# Filter only features for train dataset
+features <- colnames(train)[!(colnames(train) %in% col2remove)]
+train <- train %>% select(features)
+
+# Filter only features for test dataset
+features.test <- features[features !="logSales"]
+test <- test %>% select(features.test)
+
+```
+
+Clean up and keep only datasets to free some memory
+
+```{r FE - CleanUP}
+# Split data to 70-30 (rule of thumb)
+set.seed(1908)
+intrain <- createDataPartition(y = train$logSales, 
+                               p = 0.7, 
+                               list = FALSE)
+real.train <- train[intrain,] %>% select(features)
+real.test <- train[-intrain,] %>% select(features)
+
+# Clean up 
+rm(list=ls()[! ls() %in% c("test", "real.test","real.train",
+                           #"train","store",
+                           "train_control")])
+gc()
+```
+
+### H2O Random Forest (best so far after testing with GLM, GBM, NB)
+```{r MB - H2O Random Forest}
+
+library(h2o)
+
+h2o.init(nthreads=-1,
+         max_mem_size = '6G')
+
+trainHex <- as.h2o(real.train)
+testHex <- as.h2o(real.test)
+
+# run with default first
+rfHex <- h2o.randomForest(x = features,
+                          y = "logSales",
+                          ntrees = 150, # default is 50
+                          training_frame = trainHex,
+                          validation_frame = testHex)
+
+summary(rfHex) # RMSE 0.13
+
+```
+
+Saving results from H2O Random Forest with RMSE 0.13 as final result for submission
+```{r MB - H2O Random Forest results}
+finaltestHex <- as.h2o(test)
+## Get predictions out; predicts in H2O, as.data.frame gets them into R
+predictions<-as.data.frame(h2o.predict(rfHex,finaltestHex))
+
+## Return the predictions to the original scale of the Sales data
+pred <- expm1(predictions[,1])
+
+summary(pred)
+submission <- data.frame(Id=test$Id, Sales=pred)
+write.csv(submission,'H2O_RF.csv',
+          row.names = FALSE)
+
+```

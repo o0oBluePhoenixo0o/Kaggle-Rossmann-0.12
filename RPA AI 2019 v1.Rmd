@@ -1,0 +1,367 @@
+---
+title: "RPA AI Summit 2019"
+author: "Trung Nguyen"
+date: "5/25/2019"
+output:
+  html_document:
+    toc: true
+    theme: united
+    number_section: true
+    toc_depth: 3
+    highlight: tango
+---
+# Overview
+
+The training data set for the Rossman Store Sales consists of sales data for a set of 1115 stores across 942 days with **1050330** observations. In this project, the dataset is split to fit the 3 following cases:
+
+1. From 1.1.2013 until 31.12.2014, then forecast the next month **1.2015** using traditional timeseries forecast. In this case, we assume that the dataset **"store"** (features of each stores) is not included. Thus, this multivariate timeseries forecast does not have a lot of features.
+
+2. Using the same set above (until 31.12.2014), but this time update the ML module with **stores** features dataset. In this case, we also switch algorithm from Hybrid Forecasting to Distributed Random Forest where the performance is significantly better in forecasting sales for **1.2015**.
+
+3. Update the dataset until 31.05.2015 (6 more months), then update the model to learn the additional transactions and forecast the sales for **6.2015**
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      fig.path = "images/")
+
+getwd()
+# clear the environment
+rm(list= ls())
+gc() # garbage collection
+
+# load packages and set options
+options(stringsAsFactors = FALSE)
+
+# install packages if not available
+packages <- c("readr","data.table", #read data
+              "lubridate", "zoo", #date time conversion
+              "tidyverse", # full set of pkgs
+              "dplyr", #data exploratory + manipulation
+              "caTools", # features engineering
+              "VIM", # visualizing missing data
+              "ggplot2","ggthemes", "corrplot", # plotting graphs
+              "caret", # ML libs
+              "forecastHybrid" # Hybrid TS forecast
+)
+
+if (length(setdiff(packages, rownames(installed.packages()))) > 0) {
+  install.packages(setdiff(packages, rownames(installed.packages())))
+}
+lapply(packages, require, character.only = TRUE)
+```
+
+# Read data
+
+Read train, test and submit sample data from input folder
+
+```{r Read inputs,  results = "hide", warning = FALSE, message = FALSE}
+
+# set TryCatch for input folder (on kaggle kernel or local)
+
+file2read.df <- c('test','train','store')
+
+readinputs <- function(filename){
+   assign(filename,
+          tryCatch(fread(paste0("./input/",filename,".csv")),
+                 error = function(e){
+                   print('Detect working environment is not Kaggle kernel')
+                   fread(paste0("../input/",filename,".csv"))
+                 })
+          ,envir = .GlobalEnv) 
+}
+
+for (i in 1:length(file2read.df)){
+  readinputs(file2read.df[i])
+}
+```
+
+As stated in this official discussion [Link](https://www.kaggle.com/c/rossmann-store-sales/discussion/17048#96921), the codes bellow fixes the missing data. Then, the dataset is split into 2 parts to match the case description:
+1. Pre 1.2015
+2. Pre 6.2015
+
+
+```{r Input fix - split datasets}
+test <- test %>% mutate(Open = replace(Open, which(Store == 622 &
+                                             Date > as.Date('2015-09-04') &
+                                             Date < as.Date('2015-09-18') &
+                                             is.na(Open) == TRUE),0))
+
+# Change type for "Date"
+train$Date <- parse_date_time(train$Date,'%y-%m-%d') #lubridate pkg is fastest
+test$Date <- parse_date_time(test$Date, '%y-%m-%d')
+
+# Add and remove variables to test
+tmp <- test %>%
+  select(-Id) %>%
+  mutate(Sales = 0,
+         Customers = 0)
+
+full <- rbind(train,tmp)
+
+pre.1.15 <- full[Date < as_date('2015-01-01'),]
+pre.6.15 <- full[Date < as_date('2015-06-01'),]
+# remove unused dataset
+rm(train,test,tmp)
+```
+
+# Exploratory Data Analysis {.tabset .tabset-fade .tabset-pills}
+
+Some of the charts were taken from [Exploratory Analysis Rossmann Kernel](https://www.kaggle.com/thie1e/exploratory-analysis-rossmann) with modifications.
+Explore histograms between sales and customers.
+
+## Pre 1.2015 (no stores data)
+
+```{r EDA1 -  Charts}
+# Sales histograms
+hist(pre.1.15$Sales, 100,
+     main = "Sales per store",
+     xlab = "Sales")
+
+hist(aggregate(pre.1.15[Sales != 0]$Sales, 
+               by = list(pre.1.15[Sales != 0]$Store), mean)$x, 100, 
+     main = "Mean sales per store when store was not closed",
+     xlab = "Sales")
+
+# Customer histograms
+hist(pre.1.15$Customers, 100,
+     main = "Customers per store",
+     xlab = "Customers")
+
+hist(aggregate(pre.1.15[Sales != 0]$Customers, 
+               by = list(pre.1.15[Sales != 0]$Store), mean)$x, 100,
+     main = "Mean customers per store when store was not closed",
+     xlab = "Customers")
+
+# Sales per day of the week
+ggplot(pre.1.15[Sales != 0],
+       aes(x = factor(DayOfWeek), y = Sales)) + 
+    geom_jitter(alpha = 0.1) + 
+    geom_boxplot(color = "yellow", outlier.colour = NA, fill = NA) + 
+  labs(x = "Weekdays", title = "Sales per day of week")
+```
+
+## Pre 1.2015 (w/t stores data)
+
+```{r EDA2 -  Charts}
+# Sales histograms
+hist(pre.1.15$Sales, 100,
+     main = "Sales per store",
+     xlab = "Sales")
+
+hist(aggregate(pre.1.15[Sales != 0]$Sales, 
+               by = list(pre.1.15[Sales != 0]$Store), mean)$x, 100, 
+     main = "Mean sales per store when store was not closed",
+     xlab = "Sales")
+
+# Customer histograms
+hist(pre.1.15$Customers, 100,
+     main = "Customers per store",
+     xlab = "Customers")
+
+hist(aggregate(pre.1.15[Sales != 0]$Customers, 
+               by = list(pre.1.15[Sales != 0]$Store), mean)$x, 100,
+     main = "Mean customers per store when store was not closed",
+     xlab = "Customers")
+
+# Sales per day of the week
+ggplot(pre.1.15[Sales != 0],
+       aes(x = factor(DayOfWeek), y = Sales)) + 
+    geom_jitter(alpha = 0.1) + 
+    geom_boxplot(color = "yellow", outlier.colour = NA, fill = NA) + 
+  labs(x = "Weekdays", title = "Sales per day of week")
+```
+
+In **Case 2 - 3** where we acquire the **store** dataset, the plot below shows the differences in sales before and after competitors open in the same area.**147** stores
+had a competitor move into their area during the available time span. The competition leaves a 'dent' in the sales which looks a little different depending on the chosen `timespan`.
+
+```{r EDA2 -  Sales b4 and after competition}
+# Convert the CompetitionOpenSince... variables to one Date variable
+store$CompetitionOpenSince <- as.yearmon(paste(store$CompetitionOpenSinceYear, 
+                                               store$CompetitionOpenSinceMonth, sep = "-"))
+# Merge store and train (pre 1.2015)
+store.1.15 <- store
+
+store.1.15$CompetitionOpenSince[year(store$CompetitionOpenSince) >= 2015] <- NA
+store.1.15$CompetitionOpenSinceMonth[store$CompetitionOpenSinceYear >= 2015] <- NA
+store.1.15$CompetitionOpenSinceYear[store$CompetitionOpenSinceYear >= 2015] <- NA
+
+pre.1.15_store <- merge(pre.1.15, store.1.15, by = "Store")
+
+# Sales before and after competition opens
+pre.1.15_store$DateYearmon <- as.yearmon(pre.1.15_store$Date)
+pre.1.15_store <- pre.1.15_store[order(Date)]
+timespan <- 100 # Days to collect before and after Opening of competition
+beforeAndAfterComp <- function(s) {
+    x <- pre.1.15_store[Store == s]
+    daysWithComp <- x$CompetitionOpenSince >= x$DateYearmon
+    if (any(!daysWithComp)) {
+        compOpening <- head(which(!daysWithComp), 1) - 1
+        if (compOpening > timespan & compOpening < (nrow(x) - timespan)) {
+           x <- x[(compOpening - timespan):(compOpening + timespan), ] 
+            x$Day <- 1:nrow(x)
+            return(x)
+        }
+    }
+}
+temp <- lapply(unique(pre.1.15_store[!is.na(CompetitionOpenSince)]$Store), beforeAndAfterComp)
+temp <- do.call(rbind, temp)
+# 147 stores first had no competition but at least 100 days before the end
+# of the data set
+length(unique(temp$Store))
+ggplot(temp[Sales != 0], aes(x = Day, y = Sales)) + 
+    geom_smooth() + 
+    ggtitle(paste("Competition opening around day", timespan))
+
+rm(temp)
+```
+
+
+The different store types and assortment types imply different overall levels of sales and seem to be exhibiting different trends:
+
+```{r EDA2 -  Diff Stores sales}
+ggplot(pre.1.15_store[Sales != 0], 
+       aes(x = as.Date(Date), y = Sales, color = factor(StoreType))) + 
+    geom_smooth(size = 2)
+
+ggplot(pre.1.15_store[Customers != 0], 
+       aes(x = as.Date(Date), y = Customers, color = factor(StoreType))) + 
+    geom_smooth(size = 2)
+
+ggplot(pre.1.15_store[Sales != 0], 
+       aes(x = as.Date(Date), y = Sales, color = factor(Assortment))) + 
+    geom_smooth(size = 2)
+
+ggplot(pre.1.15_store[Sales != 0], 
+       aes(x = as.Date(Date), y = Customers, color = factor(Assortment))) + 
+    geom_smooth(size = 2)
+```
+
+From the graph below, the relationship between 'Competitor distance' and 'Sales' is a little bit counterintuitive. We can see that the closer the competitors, the higher the sales. The reason might be that these shops are already in highly dense area (like shopping districts or main streets).
+
+```{r EDA2 -  sales vs comp dist}
+salesByDist <- aggregate(pre.1.15_store[Sales != 0 & !is.na(CompetitionDistance)]$Sales, 
+               by = list(pre.1.15_store[Sales != 0 & !is.na(CompetitionDistance)]$CompetitionDistance), mean)
+
+colnames(salesByDist) <- c("CompetitionDistance", "MeanSales")
+ggplot(salesByDist, aes(x = log(CompetitionDistance), y = log(MeanSales))) + 
+    geom_point() + geom_smooth()
+```
+
+## Pre 6.2015 (w/t stores data)
+
+```{r EDA3 -  Charts}
+# Sales histograms
+hist(pre.6.15$Sales, 100,
+     main = "Sales per store",
+     xlab = "Sales")
+
+hist(aggregate(pre.6.15[Sales != 0]$Sales, 
+               by = list(pre.6.15[Sales != 0]$Store), mean)$x, 100, 
+     main = "Mean sales per store when store was not closed",
+     xlab = "Sales")
+
+# Customer histograms
+hist(pre.6.15$Customers, 100,
+     main = "Customers per store",
+     xlab = "Customers")
+
+hist(aggregate(pre.6.15[Sales != 0]$Customers, 
+               by = list(pre.6.15[Sales != 0]$Store), mean)$x, 100,
+     main = "Mean customers per store when store was not closed",
+     xlab = "Customers")
+
+# Sales per day of the week♥
+ggplot(pre.6.15[Sales != 0],
+       aes(x = factor(DayOfWeek), y = Sales)) + 
+    geom_jitter(alpha = 0.1) + 
+    geom_boxplot(color = "yellow", outlier.colour = NA, fill = NA) + 
+  labs(x = "Weekdays", title = "Sales per day of week")
+```
+
+
+We perform the same analysis on competitors in case 3,**147** stores had a competitor move into their area during the available time span. The competition leaves a 'dent' in the sales which looks a little different depending on the chosen `timespan`.
+
+```{r EDA3 -  Sales b4 and after competition}
+# Convert the CompetitionOpenSince... variables to one Date variable
+store$CompetitionOpenSince <- as.yearmon(paste(store$CompetitionOpenSinceYear, 
+                                               store$CompetitionOpenSinceMonth, sep = "-"))
+
+# Merge store and train (pre 6.2015)
+store.6.15 <- store
+
+store.6.15$CompetitionOpenSince[year(store$CompetitionOpenSince) >= 2015 & store.6.15$CompetitionOpenSinceMonth >= 6] <- NA
+store.6.15$CompetitionOpenSinceMonth[store$CompetitionOpenSinceYear >= 2015 & store.6.15$CompetitionOpenSinceMonth >= 6] <- NA
+store.6.15$CompetitionOpenSinceYear[store$CompetitionOpenSinceYear >= 2015 & 
+                                      (store.6.15$CompetitionOpenSinceMonth >= 6 | 
+                                         is.na(store.6.15$CompetitionOpenSinceMonth))] <- NA
+
+pre.6.15_store <- merge(pre.6.15, store.6.15, by = "Store")
+
+# Sales before and after competition opens
+pre.6.15_store$DateYearmon <- as.yearmon(pre.6.15_store$Date)
+pre.6.15_store <- pre.6.15_store[order(Date)]
+timespan <- 100 # Days to collect before and after Opening of competition
+beforeAndAfterComp <- function(s) {
+    x <- pre.6.15_store[Store == s]
+    daysWithComp <- x$CompetitionOpenSince >= x$DateYearmon
+    if (any(!daysWithComp)) {
+        compOpening <- head(which(!daysWithComp), 1) - 1
+        if (compOpening > timespan & compOpening < (nrow(x) - timespan)) {
+           x <- x[(compOpening - timespan):(compOpening + timespan), ] 
+            x$Day <- 1:nrow(x)
+            return(x)
+        }
+    }
+}
+temp <- lapply(unique(pre.6.15_store[!is.na(CompetitionOpenSince)]$Store), beforeAndAfterComp)
+temp <- do.call(rbind, temp)
+# 147 stores first had no competition but at least 100 days before the end
+# of the data set
+length(unique(temp$Store))
+ggplot(temp[Sales != 0], aes(x = Day, y = Sales)) + 
+    geom_smooth() + 
+    ggtitle(paste("Competition opening around day", timespan))
+
+rm(temp)
+```
+
+
+The different store types and assortment types imply different overall levels of sales and seem to be exhibiting different trends:
+
+```{r EDA3 -  Diff Stores sales}
+ggplot(pre.6.15_store[Sales != 0], 
+       aes(x = as.Date(Date), y = Sales, color = factor(StoreType))) + 
+    geom_smooth(size = 2)
+
+ggplot(pre.6.15_store[Customers != 0], 
+       aes(x = as.Date(Date), y = Customers, color = factor(StoreType))) + 
+    geom_smooth(size = 2)
+
+ggplot(pre.6.15_store[Sales != 0], 
+       aes(x = as.Date(Date), y = Sales, color = factor(Assortment))) + 
+    geom_smooth(size = 2)
+
+ggplot(pre.6.15_store[Sales != 0], 
+       aes(x = as.Date(Date), y = Customers, color = factor(Assortment))) + 
+    geom_smooth(size = 2)
+```
+
+From the graph below, the relationship between 'Competitor distance' and 'Sales' is a little bit counterintuitive. We can see that the closer the competitors, the higher the sales. The reason might be that these shops are already in highly dense area (like shopping districts or main streets).
+
+```{r EDA3 -  sales vs comp dist}
+salesByDist <- aggregate(pre.6.15_store[Sales != 0 & !is.na(CompetitionDistance)]$Sales, 
+               by = list(pre.6.15_store[Sales != 0 & !is.na(CompetitionDistance)]$CompetitionDistance), mean)
+
+colnames(salesByDist) <- c("CompetitionDistance", "MeanSales")
+ggplot(salesByDist, aes(x = log(CompetitionDistance), y = log(MeanSales))) + 
+    geom_point() + geom_smooth()
+```
+
+# Feature Engineering
+
+# Algorithm Developments
+
+
+
+
