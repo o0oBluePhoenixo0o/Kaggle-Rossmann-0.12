@@ -5,10 +5,12 @@ date: "5/25/2019"
 output:
   html_document:
     toc: true
+    toc_float: true
     theme: united
     number_section: true
     toc_depth: 3
     highlight: tango
+    code_folding: hide
 ---
 # Overview
 
@@ -21,7 +23,7 @@ The training data set for the Rossman Store Sales consists of sales data for a s
 3. Update the dataset until 31.05.2015 (6 more months), then update the model to learn the additional transactions and forecast the sales for **6.2015**
 
 
-```{r setup, include=FALSE}
+```{r setup, include=FALSE, message = FALSE, warning = FALSE}
 knitr::opts_chunk$set(echo = TRUE,
                       fig.path = "images/")
 
@@ -81,7 +83,7 @@ As stated in this official discussion [Link](https://www.kaggle.com/c/rossmann-s
 2. Pre 6.2015
 
 
-```{r Input fix - split datasets}
+```{r Input fix - split datasets, message = FALSE, warning = FALSE}
 test <- test %>% mutate(Open = replace(Open, which(Store == 622 &
                                              Date > as.Date('2015-09-04') &
                                              Date < as.Date('2015-09-18') &
@@ -112,7 +114,7 @@ Explore histograms between sales and customers.
 
 ## Pre 1.2015 (no stores data)
 
-```{r EDA1 -  Charts}
+```{r EDA1 -  Charts, message = FALSE, warning = FALSE}
 # Sales histograms
 hist(pre.1.15$Sales, 100,
      main = "Sales per store",
@@ -143,7 +145,7 @@ ggplot(pre.1.15[Sales != 0],
 
 ## Pre 1.2015 (w/t stores data)
 
-```{r EDA2 -  Charts}
+```{r EDA2 -  Charts, message = FALSE, warning = FALSE}
 # Sales histograms
 hist(pre.1.15$Sales, 100,
      main = "Sales per store",
@@ -175,7 +177,7 @@ ggplot(pre.1.15[Sales != 0],
 In **Case 2 - 3** where we acquire the **store** dataset, the plot below shows the differences in sales before and after competitors open in the same area.**147** stores
 had a competitor move into their area during the available time span. The competition leaves a 'dent' in the sales which looks a little different depending on the chosen `timespan`.
 
-```{r EDA2 -  Sales b4 and after competition}
+```{r EDA2 -  Sales b4 and after competition, message = FALSE, warning = FALSE}
 # Convert the CompetitionOpenSince... variables to one Date variable
 store$CompetitionOpenSince <- as.yearmon(paste(store$CompetitionOpenSinceYear, 
                                                store$CompetitionOpenSinceMonth, sep = "-"))
@@ -219,7 +221,7 @@ rm(temp)
 
 The different store types and assortment types imply different overall levels of sales and seem to be exhibiting different trends:
 
-```{r EDA2 -  Diff Stores sales}
+```{r EDA2 -  Diff Stores sales, message = FALSE, warning = FALSE}
 ggplot(pre.1.15_store[Sales != 0], 
        aes(x = as.Date(Date), y = Sales, color = factor(StoreType))) + 
     geom_smooth(size = 2)
@@ -239,7 +241,7 @@ ggplot(pre.1.15_store[Sales != 0],
 
 From the graph below, the relationship between 'Competitor distance' and 'Sales' is a little bit counterintuitive. We can see that the closer the competitors, the higher the sales. The reason might be that these shops are already in highly dense area (like shopping districts or main streets).
 
-```{r EDA2 -  sales vs comp dist}
+```{r EDA2 -  sales vs comp dist, message = FALSE, warning = FALSE}
 salesByDist <- aggregate(pre.1.15_store[Sales != 0 & !is.na(CompetitionDistance)]$Sales, 
                by = list(pre.1.15_store[Sales != 0 & !is.na(CompetitionDistance)]$CompetitionDistance), mean)
 
@@ -250,7 +252,7 @@ ggplot(salesByDist, aes(x = log(CompetitionDistance), y = log(MeanSales))) +
 
 ## Pre 6.2015 (w/t stores data)
 
-```{r EDA3 -  Charts}
+```{r EDA3 -  Charts, message = FALSE, warning = FALSE}
 # Sales histograms
 hist(pre.6.15$Sales, 100,
      main = "Sales per store",
@@ -271,7 +273,7 @@ hist(aggregate(pre.6.15[Sales != 0]$Customers,
      main = "Mean customers per store when store was not closed",
      xlab = "Customers")
 
-# Sales per day of the week♥
+# Sales per day of the week
 ggplot(pre.6.15[Sales != 0],
        aes(x = factor(DayOfWeek), y = Sales)) + 
     geom_jitter(alpha = 0.1) + 
@@ -282,7 +284,7 @@ ggplot(pre.6.15[Sales != 0],
 
 We perform the same analysis on competitors in case 3,**147** stores had a competitor move into their area during the available time span. The competition leaves a 'dent' in the sales which looks a little different depending on the chosen `timespan`.
 
-```{r EDA3 -  Sales b4 and after competition}
+```{r EDA3 -  Sales b4 and after competition, message = FALSE, warning = FALSE}
 # Convert the CompetitionOpenSince... variables to one Date variable
 store$CompetitionOpenSince <- as.yearmon(paste(store$CompetitionOpenSinceYear, 
                                                store$CompetitionOpenSinceMonth, sep = "-"))
@@ -297,7 +299,8 @@ store.6.15$CompetitionOpenSinceYear[store$CompetitionOpenSinceYear >= 2015 &
                                          is.na(store.6.15$CompetitionOpenSinceMonth))] <- NA
 
 pre.6.15_store <- merge(pre.6.15, store.6.15, by = "Store")
-
+# remove the non-store 6.15
+rm(pre.6.15)
 # Sales before and after competition opens
 pre.6.15_store$DateYearmon <- as.yearmon(pre.6.15_store$Date)
 pre.6.15_store <- pre.6.15_store[order(Date)]
@@ -324,12 +327,13 @@ ggplot(temp[Sales != 0], aes(x = Day, y = Sales)) +
     ggtitle(paste("Competition opening around day", timespan))
 
 rm(temp)
+
 ```
 
 
 The different store types and assortment types imply different overall levels of sales and seem to be exhibiting different trends:
 
-```{r EDA3 -  Diff Stores sales}
+```{r EDA3 -  Diff Stores sales, message = FALSE, warning = FALSE}
 ggplot(pre.6.15_store[Sales != 0], 
        aes(x = as.Date(Date), y = Sales, color = factor(StoreType))) + 
     geom_smooth(size = 2)
@@ -349,7 +353,7 @@ ggplot(pre.6.15_store[Sales != 0],
 
 From the graph below, the relationship between 'Competitor distance' and 'Sales' is a little bit counterintuitive. We can see that the closer the competitors, the higher the sales. The reason might be that these shops are already in highly dense area (like shopping districts or main streets).
 
-```{r EDA3 -  sales vs comp dist}
+```{r EDA3 -  sales vs comp dist, message = FALSE, warning = FALSE}
 salesByDist <- aggregate(pre.6.15_store[Sales != 0 & !is.na(CompetitionDistance)]$Sales, 
                by = list(pre.6.15_store[Sales != 0 & !is.na(CompetitionDistance)]$CompetitionDistance), mean)
 
@@ -359,9 +363,163 @@ ggplot(salesByDist, aes(x = log(CompetitionDistance), y = log(MeanSales))) +
 ```
 
 # Feature Engineering
+## Logs transformation
+- Since the data spans accross a large timeline, it is better to perform some transformation on the target variable. Here I pick "Log Transform"
+
+```{r Log Transform}
+pre.1.15 <- pre.1.15 %>%
+  mutate(LogSales = log1p(Sales))
+pre.1.15_store <- pre.1.15_store %>%
+  mutate(LogSales = log1p(Sales))
+pre.6.15_store <- pre.6.15_store %>%
+  mutate(LogSales = log1p(Sales))
+```
+## States as a feature
+- Since the stores locations are scattered in **GERMANY**, it is likely that multiple stores would have different *"StateHoliday"*. However, inspired from this repository in Python of @gereleth [Putting stores on map](https://gist.github.com/gereleth/781a92c97b58b07a11e2#file-putting_stores_on_map-ipynb), I decided to adopt the code and translate into R to add *states* as a feature to our dataset.
+
+* External sources:
+  + Public holidays data: http://www.timeanddate.com/holidays/germany/2013
+  + School holidays data: http://www.holidays-info.com/School-Holidays-Germany/2015/school-holidays_2015.html
+Start by grouping and cross-referencing stores with State Holidays data
+
+```{r FE - States Holiday}
+# Overview of public holiday dates and numbers of stores celebrating
+holiday <- full %>% filter(StateHoliday == 'a')
+
+## Saxony (SN) - Repentance Day (20-11-2013)
+SN <- holiday %>% filter(Date == ymd("2013-11-20"))
+
+## BW_BY_ST - Epiphany (06-01-2013)
+BW_BY_ST <- holiday %>% filter(Date == ymd("2013-01-06"))
+
+## BW_BY_HE_NW_RP_SL - Corpus Christi (30-05-2013) (also with SN)
+BW_BY_HE_NW_RP_SL <- holiday %>% filter(Date == ymd("2013-05-30"))
+# Remove SN from the list
+BW_BY_HE_NW_RP_SL <- anti_join(BW_BY_HE_NW_RP_SL,SN, by = "Store")
+
+## BY_SL - Assumption of Mary (15-08-2013)
+BY_SL <- holiday %>% filter(Date == ymd("2013-08-15"))
+
+## BB_MV_SN_ST_TH - Reformation day (31-10-2013)
+BB_MV_SN_ST_TH <- holiday %>% filter(Date == ymd("2013-10-31"))
+
+## BW_BY_NW_RP_SL- All Saint's Day (01-11-2013)
+BW_BY_NW_RP_SL <- holiday %>% filter(Date == ymd("2013-11-01"))
+
+################################
+# Intersecting and Setxoring to split states
+BW_BY <- semi_join(BW_BY_ST, BW_BY_HE_NW_RP_SL, by = "Store")
+ST <- anti_join(BW_BY_ST, BW_BY, by = "Store")
+BY <- semi_join(BW_BY, BY_SL, by = "Store")
+SL <- anti_join(BY, BY_SL, by = "Store")
+BW <- anti_join(BW_BY,BY, by = "Store")
+HE <- anti_join(BW_BY_HE_NW_RP_SL, BW_BY_NW_RP_SL, by = "Store")
+BB_MV_TH <- anti_join(anti_join(BB_MV_SN_ST_TH, SN, by = "Store"),ST, by = "Store")
+NW_RP <- anti_join(BW_BY_NW_RP_SL, BW_BY, by = "Store")
+
+allstores <- full %>% distinct(Store) # get all stores ID
+BE_HB_HH_NI_SH <- anti_join(anti_join(allstores, BW_BY_HE_NW_RP_SL, by = "Store"), BB_MV_SN_ST_TH, by = "Store")
+
+```
+
+Now using school holiday to further intersecting and setoxring to cluster stores into states
+
+```{r FE - States School Holiday}
+# 26-03-2015 is a school holiday in RP but now NW
+RP <- full %>% 
+  filter(Date == ymd("2015-03-26") & SchoolHoliday == 1) %>%
+  semi_join(NW_RP, by = "Store")
+NW <- anti_join(NW_RP, RP, by = "Store")
+
+# Winter holidays not lasting till Feb 14th rule out MV. 
+# Easter holidays starting on Mar 30th suggest TH. 
+# Confirmed by summer holidays starting on Jul 13th.
+TH <- BB_MV_TH
+
+# Only HH has easter holidays on Mar 2nd. And on May 5th.
+HH <- full %>%
+  filter(Date ==ymd("2015-03-02") & SchoolHoliday == 1) %>%
+  semi_join(BE_HB_HH_NI_SH, by = "Store")
+
+BE_HB_NI_SH <- anti_join(BE_HB_HH_NI_SH, HH, by = "Store")
+# Only SH has holidays on Apr 17th. And on Feb 2nd.
+SH <- full %>%
+  filter(Date == ymd("2015-04-17") & SchoolHoliday == 1) %>%
+  semi_join(BE_HB_NI_SH, by = "Store")
+
+BE_HB_NI <- anti_join(BE_HB_NI_SH, SH, by = "Store")
+
+#  Mar 25th is not a holiday in BE.
+BE <- full %>%
+  filter(Date == ymd("2015-03-25") & SchoolHoliday == 1) %>%
+  semi_join(BE_HB_NI, by = "Store")
+
+HB_NI <- anti_join(BE_HB_NI, BE, by = "Store")
+```
+
+Save the states into **store** dataset and plot the results of store numbers in **train** and **test** datasets. We can see that the **test** dataset does not contain store data from 5 states: **HB, NI, SN, ST** and **TH**.
+
+```{r FE - Save and plot results}
+#### Saving results to "store" df
+store <-store %>%
+  mutate(States = case_when(
+    Store %in% intersect(store$Store, BW$Store) ~ "BW",
+    Store %in% intersect(store$Store, BY$Store) ~ "BY",
+    Store %in% intersect(store$Store, BE$Store) ~ "BE",
+    Store %in% intersect(store$Store, HB_NI$Store) ~ "HB, NI",
+    Store %in% intersect(store$Store, HH$Store) ~ "HH",
+    Store %in% intersect(store$Store, HE$Store) ~ "HE",
+    Store %in% intersect(store$Store, NW$Store) ~ "NW",
+    Store %in% intersect(store$Store, RP$Store) ~ "RP",
+    Store %in% intersect(store$Store, SN$Store) ~ "SN",
+    Store %in% intersect(store$Store, ST$Store) ~ "ST",
+    Store %in% intersect(store$Store, SH$Store) ~ "SH",
+    Store %in% intersect(store$Store, TH$Store) ~ "TH"))
+
+# clean datasets
+rm(BW,BY,BE,HB_NI,HH,HE,NW,RP,SN,ST,SH,TH,SL, allstores)
+rm(BB_MV_SN_ST_TH, BB_MV_TH, BE_HB_HH_NI_SH, BE_HB_NI, BE_HB_NI_SH, 
+   BW_BY, BW_BY_HE_NW_RP_SL, BW_BY_NW_RP_SL, BW_BY_ST, BY_ST,
+   BY_SL, NW_RP, holiday)
+
+# Update store datasets for 1.15 and 6.15
+store.1.15 <- store.1.15 %>% 
+  inner_join(store %>% select(Store, States))
+store.6.15 <- store.6.15 %>% 
+  inner_join(store %>% select(Store, States))
+
+# Plot results
+tmp <-store %>% 
+  semi_join(full, by = "Store") %>%
+  select(Store, States) %>%
+  group_by(States) %>%
+  tally()
+
+ggplot(tmp, aes(States, n)) +
+  geom_bar(stat="identity", position = "dodge") + 
+  scale_fill_brewer(palette = "Set1") +
+  labs(y = "Number of Stores")
+rm(tmp)
+```
 
 # Algorithm Developments
 
+## Case 1
 
+Since we don't have any store features data in the first case, I reshape the **pre.1.15** dataset into 1115 timeseries and apply ensemble forecast to get the sales forecast for 2.2015.
+
+```{r Case 1 - Pre 2015 without store datasets, warning = FALSE, message = FALSE}
+
+# Convert to 1115 time series for all the stores
+pre.1.15_convert <- pre.1.15 %>%
+  dcast(Date ~ Store, value.var = "LogSales") %>%
+  column_to_rownames(var = "Date")
+
+# Split data to 70-30 (rule of thumb)
+train.pre.1.15 <- pre.1.15_convert[1:(0.7*nrow(pre.1.15_convert)),]
+test.pre.1.15 <- pre.1.15_convert[(0.7*nrow(pre.1.15_convert)):nrow(pre.1.15_convert),]
+
+
+```
 
 
