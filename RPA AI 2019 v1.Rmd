@@ -363,10 +363,17 @@ ggplot(salesByDist, aes(x = log(CompetitionDistance), y = log(MeanSales))) +
 ```
 
 # Feature Engineering
+
 ## Logs transformation
 - Since the data spans accross a large timeline, it is better to perform some transformation on the target variable. Here I pick "Log Transform"
 
 ```{r Log Transform}
+
+full <- full %>%
+  mutate(LogSales = log1p(Sales))
+
+full_store <- merge(full, store, by = "Store")
+
 pre.1.15 <- pre.1.15 %>%
   mutate(LogSales = log1p(Sales))
 pre.1.15_store <- pre.1.15_store %>%
@@ -406,7 +413,6 @@ BB_MV_SN_ST_TH <- holiday %>% filter(Date == ymd("2013-10-31"))
 ## BW_BY_NW_RP_SL- All Saint's Day (01-11-2013)
 BW_BY_NW_RP_SL <- holiday %>% filter(Date == ymd("2013-11-01"))
 
-################################
 # Intersecting and Setxoring to split states
 BW_BY <- semi_join(BW_BY_ST, BW_BY_HE_NW_RP_SL, by = "Store")
 ST <- anti_join(BW_BY_ST, BW_BY, by = "Store")
@@ -502,24 +508,291 @@ ggplot(tmp, aes(States, n)) +
 rm(tmp)
 ```
 
-# Algorithm Developments
+# Algorithm Developments{.tabset .tabset-fade .tabset-pills}
+
+In this demonstration, I will use only "Distributed Random Forest" (DRF) from H2O package to forecast the sales in all cases. This is the most popular and also the "winning" algorithm in the Kaggle competition of Rossmann sales prediction in 2017.
 
 ## Case 1
 
-Since we don't have any store features data in the first case, I reshape the **pre.1.15** dataset into 1115 timeseries and apply ensemble forecast to get the sales forecast for 2.2015.
+Pre.1.15 without store features.
 
-```{r Case 1 - Pre 2015 without store datasets, warning = FALSE, message = FALSE}
+```{r Case 1 - Pre 1.2015 without store features, warning = FALSE, message = FALSE}
+# Split data to 70-30 with temporal dimension(rule of thumb)
+x <- max(pre.1.15$Date) - min(pre.1.15$Date)
+x <- floor(x * 0.7) %>% as.numeric() # 510 days
 
-# Convert to 1115 time series for all the stores
-pre.1.15_convert <- pre.1.15 %>%
-  dcast(Date ~ Store, value.var = "LogSales") %>%
-  column_to_rownames(var = "Date")
+train.pre.1.15 <- pre.1.15 %>%
+  filter(Date <= as.Date(min(pre.1.15$Date)) + x)
+test.pre.1.15 <- pre.1.15 %>%
+  filter(Date > as.Date(min(pre.1.15$Date)) + x)
 
-# Split data to 70-30 (rule of thumb)
-train.pre.1.15 <- pre.1.15_convert[1:(0.7*nrow(pre.1.15_convert)),]
-test.pre.1.15 <- pre.1.15_convert[(0.7*nrow(pre.1.15_convert)):nrow(pre.1.15_convert),]
+# Create "features" sets
+## Set up variable to use all features other than those specified here
+col2remove <- c("Id","Date",
+                "Sales",
+                "Customers")
 
+# Filter only features for pre.1.15 dataset
+features <- colnames(pre.1.15)[!(colnames(pre.1.15) %in% col2remove)]
+train.pre.1.15 <- train.pre.1.15 %>% select(features)
+test.pre.1.15 <- test.pre.1.15 %>% select(features)
+
+# There are some NAs in the integer columns so conversion to zero
+train.pre.1.15[is.na(train.pre.1.15)]   <- 0
+test.pre.1.15[is.na(test.pre.1.15)]   <- 0
 
 ```
+
+
+With the dedicated train and test datasets, DRF build a model with RMSE **0.24**.
+
+```{r Case 1 - DRF H2O build model, message = FALSE, warning = FALSE, results="hide"}
+library(h2o)
+
+h2o.init(nthreads=-1,
+         max_mem_size = '6G')
+
+h2o.show_progress()
+
+trainHex <- as.h2o(train.pre.1.15)
+testHex <- as.h2o(test.pre.1.15)
+
+# run with default first
+rfHex <- h2o.randomForest(x = features,
+                          y = "LogSales",
+                          ntrees = 150, # default is 50
+                          nbins_cats = 1115, # for 1115 stores
+                          training_frame = trainHex,
+                          validation_frame = testHex)
+```
+
+Forecast for Jan 2015, build ML model using all the data from pre.1.15. Achieve RMSE of **0.23**
+
+```{r Case 1 - Forecast for 2.2015, message= FALSE, warning= FALSE}
+h2o.no_progress()
+print(paste0('Case 1 - RMSE of model: ',round(h2o.rmse(rfHex),2)))
+
+# Predict for 2.2015
+predict.Jan.2015 <- full %>% filter(Date < as_date("2015-02-01") & Date > as_date("2014-12-31"))
+features.pred <- features[features !="LogSales"]
+predict.Jan.2015Hex <- as.h2o(predict.Jan.2015 %>% select(features.pred))
+
+
+
+# Run model on full set pre.1.15
+full.pre.1.15 <- pre.1.15 %>% select(features)
+pre.1.15Hex <- as.h2o(full.pre.1.15)
+
+rfHex.fc <- h2o.randomForest(x = features,
+                             y = "LogSales",
+                             ntrees = 150, # default is 50
+                             nbins_cats = 1115,
+                             training_frame = pre.1.15Hex)
+
+## Get predictions out; predicts in H2O, as.data.frame gets them into R
+predictions <- as.data.frame(h2o.predict(rfHex.fc,
+                                         predict.Jan.2015Hex))
+## Return the predictions to the original scale of the Sales data
+pred <- expm1(predictions[,1])
+
+# Compare to the real results
+print(paste0('Case 1 - RMSE compare to Jan 2015: ',round(ModelMetrics::rmse(predict.Jan.2015$LogSales, predictions$predict),2)))
+
+```
+
+
+## Case 2
+
+Pre.1.15 with store features.
+
+```{r Case 2 - Pre 1.2015 with store features, warning = FALSE, message = FALSE}
+# Split data to 70-30 with temporal dimension(rule of thumb)
+x <- max(pre.1.15_store$Date) - min(pre.1.15_store$Date)
+x <- floor(x * 0.7) %>% as.numeric() # 510 days
+
+train.pre.1.15_store <- pre.1.15_store %>%
+  filter(Date <= as.Date(min(pre.1.15_store$Date)) + x)
+test.pre.1.15_store <- pre.1.15_store %>%
+  filter(Date > as.Date(min(pre.1.15_store$Date)) + x)
+
+# Create "features" sets
+## Set up variable to use all features other than those specified here
+col2remove <- c("Id","Date",
+                "Sales",
+                "DateYearmon",
+                "CompetitionOpenSince",
+                #"logSales",
+                "Customers", 
+                "CompetitionDistance", 
+                "CompetitionOpenSinceMonth", 
+                "CompetitionOpenSinceYear", 
+                "Promo2SinceWeek", 
+                "Promo2SinceYear", 
+                "PromoInterval", 
+                "CompetitionEntrance")
+# Filter only features for pre.1.15_store dataset
+features <- colnames(pre.1.15_store)[!(colnames(pre.1.15_store) %in% col2remove)]
+train.pre.1.15_store <- train.pre.1.15_store %>% select(features)
+test.pre.1.15_store <- test.pre.1.15_store %>% select(features)
+
+# There are some NAs in the integer columns so conversion to zero
+train.pre.1.15_store[is.na(train.pre.1.15_store)]   <- 0
+test.pre.1.15_store[is.na(test.pre.1.15_store)]   <- 0
+
+```
+
+
+With the dedicated train and test datasets, DRF build a model with RMSE **0.2**.
+
+```{r Case 2 - DRF H2O build model, message = FALSE, warning = FALSE, results="hide"}
+library(h2o)
+
+h2o.init(nthreads=-1,
+         max_mem_size = '6G')
+
+h2o.show_progress()
+trainHex <- as.h2o(train.pre.1.15_store)
+testHex <- as.h2o(test.pre.1.15_store)
+
+# run with default first
+rfHex <- h2o.randomForest(x = features,
+                          y = "LogSales",
+                          ntrees = 150, # default is 50
+                          nbins_cats = 1115, # for 1115 stores
+                          training_frame = trainHex,
+                          validation_frame = testHex)
+```
+
+Forecast for Feb 2015, build ML model using all the data from pre.1.15_store. Achieve RMSE of **0.19**
+
+```{r Case 2 - Forecast for 1.2015, message= FALSE, warning= FALSE}
+h2o.no_progress()
+print(paste0('Case 2 - RMSE of model: ',round(h2o.rmse(rfHex),2)))
+
+# Predict for 2.2015
+predict.Jan.2015 <- full_store %>% filter(Date < as_date("2015-02-01") & Date > as_date("2014-12-31"))
+features.pred <- features[features !="LogSales"]
+predict.Jan.2015Hex <- as.h2o(predict.Jan.2015 %>% select(features.pred))
+
+
+# Run model on full set pre.1.15_store
+full.pre.1.15_store <- pre.1.15_store %>% select(features)
+pre.1.15_storeHex <- as.h2o(full.pre.1.15_store)
+
+rfHex.fc <- h2o.randomForest(x = features,
+                             y = "LogSales",
+                             ntrees = 150, # default is 50
+                             nbins_cats = 1115,
+                             training_frame = pre.1.15_storeHex)
+
+## Get predictions out; predicts in H2O, as.data.frame gets them into R
+predictions <- as.data.frame(h2o.predict(rfHex.fc,
+                                         predict.Jan.2015Hex))
+## Return the predictions to the original scale of the Sales data
+pred <- expm1(predictions[,1])
+
+# Compare to the real results
+print(paste0('Case 2 - RMSE of prediction for Jan 2015: ',round(ModelMetrics::rmse(predict.Jan.2015$LogSales, predictions$predict),2)))
+
+```
+
+
+## Case 3
+
+Now with the timestamp at 6 months later (May 2015). We would like to update our ML algorithm with the new data of 6 months
+Pre.6.15 with store features.
+
+```{r Case 3 - Pre 6.2015 with store features, warning = FALSE, message = FALSE}
+# Split data to 70-30 with temporal dimension(rule of thumb)
+x <- max(pre.6.15_store$Date) - min(pre.6.15_store$Date)
+x <- floor(x * 0.7) %>% as.numeric() # 510 days
+
+train.pre.6.15_store <- pre.6.15_store %>%
+  filter(Date <= as.Date(min(pre.6.15_store$Date)) + x)
+test.pre.6.15_store <- pre.6.15_store %>%
+  filter(Date > as.Date(min(pre.6.15_store$Date)) + x)
+
+# Create "features" sets
+## Set up variable to use all features other than those specified here
+col2remove <- c("Id","Date",
+                "Sales",
+                "DateYearmon",
+                "CompetitionOpenSince",
+                #"logSales",
+                "Customers", 
+                "CompetitionDistance", 
+                "CompetitionOpenSinceMonth", 
+                "CompetitionOpenSinceYear", 
+                "Promo2SinceWeek", 
+                "Promo2SinceYear", 
+                "PromoInterval", 
+                "CompetitionEntrance")
+# Filter only features for pre.6.15_store dataset
+features <- colnames(pre.6.15_store)[!(colnames(pre.6.15_store) %in% col2remove)]
+train.pre.6.15_store <- train.pre.6.15_store %>% select(features)
+test.pre.6.15_store <- test.pre.6.15_store %>% select(features)
+
+# There are some NAs in the integer columns so conversion to zero
+train.pre.6.15_store[is.na(train.pre.6.15_store)]   <- 0
+test.pre.6.15_store[is.na(test.pre.6.15_store)]   <- 0
+
+```
+
+
+With the dedicated train and test datasets, DRF build a model with RMSE **0.2**.
+
+```{r Case 3 - DRF H2O build model, message = FALSE, warning = FALSE, results="hide"}
+library(h2o)
+
+h2o.init(nthreads=-1,
+         max_mem_size = '6G')
+
+h2o.show_progress()
+trainHex <- as.h2o(train.pre.6.15_store)
+testHex <- as.h2o(test.pre.6.15_store)
+
+# run with default first
+rfHex <- h2o.randomForest(x = features,
+                          y = "LogSales",
+                          ntrees = 150, # default is 50
+                          nbins_cats = 1115, # for 1115 stores
+                          training_frame = trainHex,
+                          validation_frame = testHex)
+```
+
+Forecast for June 2015, build ML model using all the data from pre.6.15_store. Achieve RMSE of **0.18**.
+
+```{r Case 3 - Forecast for 6.2015, message= FALSE, warning= FALSE}
+h2o.no_progress()
+print(paste0('Case 3 - RMSE of model: ',round(h2o.rmse(rfHex),2)))
+
+# Predict for 6.2015
+predict.June.2015 <- full_store %>% filter(Date < as_date("2015-07-01") & Date > as_date("2015-05-31"))
+features.pred <- features[features !="LogSales"]
+predict.June.2015Hex <- as.h2o(predict.June.2015 %>% select(features.pred))
+
+
+# Run model on full set pre.6.15_store
+full.pre.6.15_store <- pre.6.15_store %>% select(features)
+pre.6.15_storeHex <- as.h2o(full.pre.6.15_store)
+
+rfHex.fc <- h2o.randomForest(x = features,
+                             y = "LogSales",
+                             ntrees = 150, # default is 50
+                             nbins_cats = 1115,
+                             training_frame = pre.6.15_storeHex)
+
+## Get predictions out; predicts in H2O, as.data.frame gets them into R
+predictions <- as.data.frame(h2o.predict(rfHex.fc,
+                                         predict.June.2015Hex))
+## Return the predictions to the original scale of the Sales data
+pred <- expm1(predictions[,1])
+
+# Compare to the real results
+print(paste0('Case 3 - RMSE of prediction for June 2015: ',round(ModelMetrics::rmse(predict.June.2015$LogSales, predictions$predict),2)))
+
+```
+
+
 
 
